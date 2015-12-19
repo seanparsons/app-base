@@ -27,6 +27,7 @@ library
                      , template-haskell
                      , lens
                      , postgresql-simple
+                     , unordered-containers
   default-language:    Haskell2010
 
 test-suite app-base-test

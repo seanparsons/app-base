@@ -7,11 +7,13 @@
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE QuasiQuotes #-}
 
 module Entities (
     FieldType(..)
   , Field(..)
   , EntityReference(..)
+  , EntityMetadata(..)
   , Entity(..)
   , AllEntityInfo
   , FromRow(..)
@@ -20,52 +22,69 @@ module Entities (
   , RowParser
   , MonadReader(..)
   , field
+  , queryReader
   , makeEntities
   , makeEntitiesLenses
   , makeEntitiesFromRow
   , makeEntitiesToRow
   , makeEntitiesPostgresClasses
+  , makeEntityMethods
 ) where
 
-import Data.Text hiding (toUpper, toLower, intersperse, foldl', length)
+import Data.Text hiding (toUpper, toLower, intersperse, foldl', length, concat, filter)
+import qualified Data.Text as T
 import Data.List (intersperse, foldl')
 import Language.Haskell.TH
 import Control.Monad
+import Control.Monad.IO.Class
+import Control.Monad.Wiring
 import Control.Lens.TH
+import Control.Lens
+import Control.Lens.Traversal
 import Data.Char
 import Database.PostgreSQL.Simple
 import Database.PostgreSQL.Simple.ToRow
 import Database.PostgreSQL.Simple.FromRow
 import Database.PostgreSQL.Simple.ToField
 import Database.PostgreSQL.Simple.FromField hiding (Field)
-import Servant.Server
 import Control.Monad.Reader.Class
 import Control.Monad.Reader.Class.Wiring
+import qualified Data.HashSet as S
 
 data FieldType = TextFieldType
                | IntFieldType
-               | MaybeFieldType FieldType
+               | MaybeFieldType { _maybeInnerType :: FieldType }
+
+makeLenses ''FieldType
 
 data Field = Field
-           { fieldName :: Text
-           , fieldType :: FieldType
+           { _fieldName :: Text
+           , _fieldType :: FieldType
            }
 
+makeLenses ''Field
+
 data EntityReference = EntityReference
-                     { originEntity       :: Text
-                     , originFields       :: [Text]
-                     , referencedEntity   :: Text
-                     , referencedFields   :: [Text]
+                     { _originEntity       :: Text
+                     , _originFields       :: [Text]
+                     , _referencedEntity   :: Text
+                     , _referencedFields   :: [Text]
                      }
 
-data EntityMetadata = IndexEntityMetadata [Text]
-                    | PrimaryKeyEntityMetadata [Text]
+makeLenses ''EntityReference
+
+data EntityMetadata = IndexEntityMetadata       { _indexFieldNames      :: [Text] }
+                    | PrimaryKeyEntityMetadata  { _primaryKeyFieldNames :: [Text] }
+
+makeLenses ''EntityMetadata
 
 data Entity = Entity
-            { entityName      :: Text
-            , entityFields    :: [Field]
-            , entityMetadata  :: [EntityMetadata]
+            { _entityName      :: Text
+            , _entityFields    :: [Field]
+            , _entityMetadata  :: [EntityMetadata]
             }
+
+makeLenses ''Entity
 
 type AllEntityInfo = ([Entity], [EntityReference])
 
@@ -76,7 +95,7 @@ mkTextName :: Text -> Name
 mkTextName = mkName . unpack
 
 mkEntityName :: Entity -> Name
-mkEntityName = mkTextName . entityName
+mkEntityName = mkTextName . _entityName
 
 mkEntityType :: Entity -> TypeQ
 mkEntityType = conT . mkEntityName
@@ -91,6 +110,9 @@ fieldTypeToType (MaybeFieldType innerFieldType)       = do
   let inner     = fieldTypeToType innerFieldType
   let maybeName = conT $ mkName "Maybe"
   appT maybeName inner
+
+fieldToType :: Field -> TypeQ
+fieldToType (Field _ fieldType) = fieldTypeToType fieldType
 
 fieldToStrictType :: Field -> VarStrictTypeQ
 fieldToStrictType (Field name fieldType) = do
@@ -110,16 +132,16 @@ lowerFirstLetter (x : xs)   = toLower x : xs
 
 makeEntities :: AllEntityInfo -> Q [Dec]
 makeEntities (entities, references) = (flip traverse) entities $ \entity -> do
-  let declName  = mkTextName $ entityName entity
-  let fields    = fmap fieldToStrictType (entityFields entity)
+  let declName  = mkTextName $ _entityName entity
+  let fields    = fmap fieldToStrictType (_entityFields entity)
   dataD (return []) declName [] [recC declName fields] defaultDeriving
 
 makeEntitiesLenses :: AllEntityInfo -> Q [Dec]
 makeEntitiesLenses (entities, references) = fmap join $ (flip traverse) entities $ \entity -> do
-  let nameOfEntity                = entityName entity
+  let nameOfEntity                = _entityName entity
   let declName                    = mkTextName nameOfEntity
   let makeLensPair (Field name _) = (unpack name, (lowerFirstLetter $ unpack nameOfEntity) ++ (upperFirstLetter $ unpack name))
-  let lensDetails                 = fmap makeLensPair $ entityFields entity
+  let lensDetails                 = fmap makeLensPair $ _entityFields entity
   makeLensesFor lensDetails declName
 
 fieldFnExp :: ExpQ
@@ -136,7 +158,7 @@ makeFromRow entityName (_ : fs) =
 makeEntitiesFromRow :: AllEntityInfo -> Q [Dec]
 makeEntitiesFromRow (entities, references) = (flip traverse) entities $ \entity -> do
   let instanceType  = appT (conT $ mkName "FromRow") (mkEntityType entity)
-  let fromRowClause = clause [] (normalB $ makeFromRow (entityName entity) (entityFields entity)) []
+  let fromRowClause = clause [] (normalB $ makeFromRow (_entityName entity) (_entityFields entity)) []
   let fromRowDecl   = funD (mkName "fromRow") [fromRowClause]
   instanceD (return []) instanceType [fromRowDecl]
 
@@ -150,25 +172,40 @@ makeToRow entityName fields =
 makeEntitiesToRow :: AllEntityInfo -> Q [Dec]
 makeEntitiesToRow (entities, references) = (flip traverse) entities $ \entity -> do
   let instanceType  = appT (conT $ mkName "ToRow") (mkEntityType entity)
-  let toRowDecl     = funD (mkName "toRow") [makeToRow (entityName entity) (entityFields entity)]
+  let toRowDecl     = funD (mkName "toRow") [makeToRow (_entityName entity) (_entityFields entity)]
   instanceD (return []) instanceType [toRowDecl]
 
 makeEntitiesPostgresClasses :: AllEntityInfo -> Q [Dec]
 makeEntitiesPostgresClasses allInfo = (++) <$> makeEntitiesToRow allInfo <*> makeEntitiesFromRow allInfo
 
 queryReader :: (ToRow q, FromRow a, Functor m, MonadReader r m, MonadIO m, Wirable r Connection) => Query -> q -> m [a]
-queryReader query queryParams = do
+queryReader dbQuery queryParams = do
   connection <- wiredAsk
-  liftIO $ query connection query queryParams
+  liftIO $ query connection dbQuery queryParams
 
-makePrimaryKeyedEntityMethods :: Text -> [Field] -> DecQ
-makePrimaryKeyedEntityMethods entityName primaryKeyFields = do
-  --let methodType = 
-  -- Needs a version of wiredAsk that operates on the typeclass.
-  let keyClauses  = concat $ intersperse ", " $ fmap (\f -> (unpack $ toLower $ fieldName f) ++ " = ?") primaryKeyFields
-  let query       = litE $ stringL ("select * from " ++ (toLower entityName) ++ "s where " ++ keyClauses)
-  let clause      = 
-  funD (mkName )
+makePrimaryKeyedEntityMethods :: Entity -> Q [Dec]
+makePrimaryKeyedEntityMethods entity = case (toListOf (entityMetadata . each . primaryKeyFieldNames) entity) of
+  []            -> return []
+  [_ : _ : _]   -> reportError "Too many primary keys." >> return [] 
+  [fieldNames]  -> do
+    let pkFieldNames = S.fromList fieldNames
+    let remainingFieldNames = S.difference pkFieldNames (S.fromList $ toListOf (entityFields . each . fieldName) entity)
+    if S.null remainingFieldNames then return () else reportError ("Fields listed in primary key not present in entity: " ++ show remainingFieldNames)
+    let keyClauses    = concat $ intersperse ", " $ fmap (\f -> (unpack $ T.toLower f) ++ " = ?") fieldNames
+    let query         = litE $ stringL ("select * from " ++ (unpack $ T.toLower $ _entityName entity) ++ "s where " ++ keyClauses)
+    patternNames      <- traverse (\f -> newName $ unpack f) fieldNames
+    let callParams    = [query, (tupE (fmap varE patternNames))]
+    let lookupClause  = clause (fmap varP patternNames) (normalB $ foldl' appE (varE $ mkName "queryReader") callParams) []
+    do
+      let functionName = mkName ("get" ++ (unpack $ _entityName entity) ++ "ByPK")  
+      let idParameters = foldl' appT (tupleT $ S.size pkFieldNames) $ fmap fieldToType $ filter (\f -> S.member (_fieldName f) pkFieldNames) $ _entityFields entity
+      let entityType   = mkEntityType entity
+      signatureDef  <- sigD functionName $ [t|(ToRow $idParameters, FromRow $entityType, MonadIO m, MonadReader r m, Wirable r Connection) => $idParameters -> m [$entityType]|]
+      functionDef   <- funD functionName [lookupClause]
+      return [signatureDef, functionDef]
 
 makeEntityMethods :: AllEntityInfo -> Q [Dec]
-makeEntityMethods (entities, _) = (flip traverse) entities $ \entity -> do
+makeEntityMethods (entities, _) = do
+  primaryKeyMethods <- (flip traverse) entities $ \entity -> do
+    makePrimaryKeyedEntityMethods entity
+  return $ join primaryKeyMethods
