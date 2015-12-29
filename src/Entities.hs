@@ -186,7 +186,7 @@ queryReader dbQuery queryParams = do
 makePrimaryKeyedEntityMethods :: Entity -> Q [Dec]
 makePrimaryKeyedEntityMethods entity = case (toListOf (entityMetadata . each . primaryKeyFieldNames) entity) of
   []            -> return []
-  [_ : _ : _]   -> reportError "Too many primary keys." >> return [] 
+  [_ : _ : _]   -> reportError "Too many primary keys." >> return []
   [fieldNames]  -> do
     let pkFieldNames = S.fromList fieldNames
     let remainingFieldNames = S.difference pkFieldNames (S.fromList $ toListOf (entityFields . each . fieldName) entity)
@@ -197,12 +197,28 @@ makePrimaryKeyedEntityMethods entity = case (toListOf (entityMetadata . each . p
     let callParams    = [query, (tupE (fmap varE patternNames))]
     let lookupClause  = clause (fmap varP patternNames) (normalB $ foldl' appE (varE $ mkName "queryReader") callParams) []
     do
-      let functionName = mkName ("get" ++ (unpack $ _entityName entity) ++ "ByPK")  
+      let functionName = mkName ("get" ++ (unpack $ _entityName entity) ++ "ByPK")
       let idParameters = foldl' appT (tupleT $ S.size pkFieldNames) $ fmap fieldToType $ filter (\f -> S.member (_fieldName f) pkFieldNames) $ _entityFields entity
       let entityType   = mkEntityType entity
       signatureDef  <- sigD functionName $ [t|(ToRow $idParameters, FromRow $entityType, MonadIO m, MonadReader r m, Wirable r Connection) => $idParameters -> m [$entityType]|]
       functionDef   <- funD functionName [lookupClause]
       return [signatureDef, functionDef]
+
+makeInsertEntityMethods :: Entity -> Q [Dec]
+makeInsertEntityMethods entity = do
+  let functionName        = mkName ("insert" ++ (unpack $ _entityName entity))
+  let fields              = _entityFields entity
+  let fieldParameterTypes = foldl' appT (tupleT $ length fields) $ fmap fieldToType $ fields
+  let validFieldNames     = fmap (mkName . unpack . _fieldName) $ fields
+  let columnNames         = join $ intersperse "," $ fmap (unpack . T.toLower . _fieldName) fields
+  let columnWildcards     = join $ intersperse "," $ fmap (\_ -> "?") fields
+  let fieldParameters     = tupP $ fmap varP validFieldNames
+  let fieldsTuple         = tupE $ fmap varE validFieldNames
+  let query               = litE $ stringL ("insert into " ++ (unpack $ T.toLower $ _entityName entity) ++ "(" ++ columnNames ++ ") VALUES (" ++ columnWildcards ++ ")")
+  signatureDef  <- sigD functionName $ [t|(ToRow $fieldParameterTypes, MonadIO m, MonadReader r m, Wirable r Connection) => $fieldParameterTypes -> m ()|]
+  let lookupClause        = clause [[p|$fieldParameters|]] (normalB $ [|wiredAsk >>= (\c -> execute c $query $fieldsTuple) >> return ()|]) []
+  functionDef   <- funD functionName [lookupClause]
+  return [signatureDef, functionDef]
 
 makeEntityMethods :: AllEntityInfo -> Q [Dec]
 makeEntityMethods (entities, _) = do
