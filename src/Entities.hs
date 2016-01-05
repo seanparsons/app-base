@@ -200,7 +200,7 @@ makePrimaryKeyedEntityMethods entity = case (toListOf (entityMetadata . each . p
       let functionName = mkName ("get" ++ (unpack $ _entityName entity) ++ "ByPK")
       let idParameters = foldl' appT (tupleT $ S.size pkFieldNames) $ fmap fieldToType $ filter (\f -> S.member (_fieldName f) pkFieldNames) $ _entityFields entity
       let entityType   = mkEntityType entity
-      signatureDef  <- sigD functionName $ [t|(ToRow $idParameters, FromRow $entityType, MonadIO m, MonadReader r m, Wirable r Connection) => $idParameters -> m [$entityType]|]
+      signatureDef  <- sigD functionName $ [t|forall m . forall r . (ToRow $idParameters, FromRow $entityType, MonadIO m, MonadReader r m, Wirable r Connection) => $idParameters -> m [$entityType]|]
       functionDef   <- funD functionName [lookupClause]
       return [signatureDef, functionDef]
 
@@ -215,13 +215,13 @@ makeInsertEntityMethods entity = do
   let fieldParameters     = tupP $ fmap varP validFieldNames
   let fieldsTuple         = tupE $ fmap varE validFieldNames
   let query               = litE $ stringL ("insert into " ++ (unpack $ T.toLower $ _entityName entity) ++ "(" ++ columnNames ++ ") VALUES (" ++ columnWildcards ++ ")")
-  signatureDef  <- sigD functionName $ [t|(ToRow $fieldParameterTypes, MonadIO m, MonadReader r m, Wirable r Connection) => $fieldParameterTypes -> m ()|]
-  let lookupClause        = clause [[p|$fieldParameters|]] (normalB $ [|wiredAsk >>= (\c -> execute c $query $fieldsTuple) >> return ()|]) []
+  signatureDef  <- sigD functionName $ [t|forall m . forall r . (ToRow $fieldParameterTypes, MonadIO m, MonadReader r m, Wirable r Connection) => $fieldParameterTypes -> m ()|]
+  let lookupClause        = clause [[p|$fieldParameters|]] (normalB $ [|wiredAsk >>= (\c -> liftIO $ execute c $query $fieldsTuple) >> return ()|]) []
   functionDef   <- funD functionName [lookupClause]
   return [signatureDef, functionDef]
 
 makeEntityMethods :: AllEntityInfo -> Q [Dec]
 makeEntityMethods (entities, _) = do
-  primaryKeyMethods <- (flip traverse) entities $ \entity -> do
-    makePrimaryKeyedEntityMethods entity
-  return $ join primaryKeyMethods
+  primaryKeyMethods <- (flip traverse) entities makePrimaryKeyedEntityMethods
+  insertEntityMethods <- (flip traverse) entities makeInsertEntityMethods
+  return $ join $ primaryKeyMethods ++ insertEntityMethods
