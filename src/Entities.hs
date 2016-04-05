@@ -225,3 +225,5 @@ makeEntityMethods (entities, _) = do
   primaryKeyMethods <- (flip traverse) entities makePrimaryKeyedEntityMethods
   insertEntityMethods <- (flip traverse) entities makeInsertEntityMethods
   return $ join $ primaryKeyMethods ++ insertEntityMethods
+
+
