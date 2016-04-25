@@ -16,7 +16,7 @@ cabal-version:       >=1.10
 library
   hs-source-dirs:      src
   exposed-modules:     Entities
-  ghc-options:         -ddump-splices
+  -- ghc-options:         -ddump-splices
   build-depends:       base >= 4.7 && < 5
                      , wiring
                      , glue
