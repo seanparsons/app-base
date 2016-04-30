@@ -5,7 +5,7 @@ nix:
   packages: [postgresql94]
 
 # Specifies the GHC version and set of packages available (e.g., lts-3.5, nightly-2015-09-21, ghc-7.10.2)
-resolver: lts-3.17
+resolver: lts-5.9
 
 # Local packages, usually specified by relative directory name
 packages:
@@ -13,9 +13,9 @@ packages:
 
 # Packages to be pulled from upstream that are not in the resolver (e.g., acme-missiles-0.3)
 extra-deps:
-- servant-blaze-0.4.4.5
-- servant-server-0.4.4.5
-- servant-0.4.4.5
+- servant-blaze-0.7
+- servant-server-0.7
+- servant-0.7
 - glue-0.2.0
 - wiring-0.4.2
 
